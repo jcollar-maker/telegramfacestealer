@@ -1,6 +1,7 @@
 import os
 import requests
-from flask import Flask, request, jsonify from openai import OpenAI
+from flask import Flask, request
+from openai import OpenAI
 
 # Load secrets from environment variables TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") OPENAI_KEY = os.getenv("OPENAI_KEY") ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
