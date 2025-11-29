@@ -1,86 +1,113 @@
-# main.py - clean version
+# main.py - battle-ready version (Nov 2025)
 
 import os
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from openai import OpenAI
 
-# Load secrets from environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("Missing TELEGRAM_TOKEN environment variable")
-if not OPENAI_KEY:
-    raise ValueError("Missing OPENAI_KEY environment variable")
-if not ODDS_API_KEY:
-    raise ValueError("Missing ODDS_API_KEY environment variable")
-
 client = OpenAI(api_key=OPENAI_KEY)
 app = Flask(__name__)
 
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Get NFL Odds
-def get_betting_odds(message_text):
-    url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=h2h"
-    response = requests.get(url)
 
-    if response.status_code == 200:
+def get_odds(sport_key="americanfootball_ncaaf"):  # default to college, change to nfl if you want
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h,spreads,totals,player_pass_yds,player_rush_yds,player_recv_yds",
+        "oddsFormat": "decimal",
+        "dateFormat": "iso"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return None
+
+
+def build_game_summary():
+    games = get_odds("americanfootball_ncaaf") or get_odds("americanfootball_nfl")
+    if not games:
+        return "⚠️ Odds API down or key expired."
+
+    lines = []
+    for game in games[:8]:  # top 8 games
+        home = game["home_team"]
+        away = game["away_team"]
+        commence = game["commence_time"][:10]
+
         try:
-            data = response.json()
-            if data and isinstance(data, list):
-                game = data[0]
-                home = game['home_team']
-                away = game['away_team']
-                bookmaker = game['bookmakers'][0]
-                market = bookmaker['markets'][0]
-                outcomes = market['outcomes']
+            bk = game["bookmakers"][0]["markets"]
+            # Find spread
+            spread = next(m for m in bk if m["key"] == "spreads")
+            home_spread = next(o for o in spread["outcomes"] if o["name"] == home)["point"]
+            total = next(m for m in bk if m["key"] == "totals")
+            over = next(o for o in total["outcomes"] if o["point"] > 0)["point"]
 
-                return f"Example Odds:\n{home} vs {away}\n{outcomes}"
+            lines.append(f"🏈 {away} @ {home}\n   {home} {home_spread:+.1f} | O/U {over}\n   {commence}")
         except:
-            pass
+            lines.append(f"🏈 {away} @ {home} – {commence}")
 
-    return "Sorry, I couldn't fetch odds."
+    return "🔥 Today's Sharp Card:\n\n" + "\n\n".join(lines)
 
 
-# Generate AI response
-def generate_ai_response(message_text):
-    prompt = f"Analyze NFL odds and comment: {message_text}"
+def ai_pick_engine(user_message):
+    odds_data = get_odds("americanfootball_ncaaf") or get_odds("americanfootball_nfl")
+    context = "You are an elite sharp sports bettor. Give ONE strong college or NFL player prop or side/total with reasoning under 100 words."
+
+    if odds_data:
+        context += f"\n\nLive games snippet: {str(odds_data[:3])}"
 
     try:
-        completion = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150
+            temperature=0.7,
+            max_tokens=200,
+            messages=[
+                {"role": "system", "content": context},
+                {"role": "user", "content": user_message}
+            ]
         )
-        return completion.choices[0].message.content.strip()
-
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"AI Error: {str(e)}"
+        return f"AI choked: {e}"
 
 
-@app.route(f"/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
+    update = request.get_json()
 
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "").strip().lower()
 
-        if "odds" in text.lower():
-            reply = get_betting_odds(text)
+        if any(x in text for x in ["card", "slate", "games", "today"]):
+            reply = build_game_summary()
+        elif any(x in text for x in ["pick", "play", "bet", "sharp"]):
+            reply = ai_pick_engine(text)
         else:
-            reply = generate_ai_response(text)
+            reply = "👊 Send me:\n• “card” → today’s slate\n• “pick” → one sharp AI play\n• or just ask anything NFL/CFB"
 
         requests.post(
-            TELEGRAM_URL,
-            json={"chat_id": chat_id, "text": reply}
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"}
         )
 
-    return {"ok": True}
+    return jsonify({"ok": True})
+
+
+# Health check so Railway/Render doesn’t kill it
+@app.route("/")
+def home():
+    return "Bot alive 🤖"
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
