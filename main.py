@@ -1,7 +1,5 @@
-import os
-import requests
-from flask import Flask, request
-from openai import OpenAI
+# main.py - clean version
+
 import os
 import requests
 from flask import Flask, request
@@ -12,100 +10,77 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
-# Validate that secrets exist
 if not TELEGRAM_TOKEN:
     raise ValueError("Missing TELEGRAM_TOKEN environment variable")
-
 if not OPENAI_KEY:
     raise ValueError("Missing OPENAI_KEY environment variable")
-
 if not ODDS_API_KEY:
     raise ValueError("Missing ODDS_API_KEY environment variable")
 
-# Set up API clients
 client = OpenAI(api_key=OPENAI_KEY)
 app = Flask(__name__)
 
-# Telegram base URL
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+# Get NFL Odds
+def get_betting_odds(message_text):
+    url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=h2h"
     response = requests.get(url)
-    if response.status_code != 200:
-        return "Could not fetch odds."
 
-    data = response.json()
-    if not data:
-        return "No NFL odds found."
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            if data and isinstance(data, list):
+                game = data[0]
+                home = game['home_team']
+                away = game['away_team']
+                bookmaker = game['bookmakers'][0]
+                market = bookmaker['markets'][0]
+                outcomes = market['outcomes']
 
-    game = data[0]  # First game in list
-    home = game["home_team"]
-    away = game["away_team"]
+                return f"Example Odds:\n{home} vs {away}\n{outcomes}"
+        except:
+            pass
 
-    home_price = game["bookmakers"][0]["markets"][0]["outcomes"][0]["price"]
-    away_price = game["bookmakers"][0]["markets"][0]["outcomes"][1]["price"]
-
-    return f"{home} ({home_price}) vs {away} ({away_price})"
+    return "Sorry, I couldn't fetch odds."
 
 
-# ---------------------------------------------------------
-#  GENERATE AI RESPONSE
-# ---------------------------------------------------------
+# Generate AI response
 def generate_ai_response(message_text):
+    prompt = f"Analyze NFL odds and comment: {message_text}"
+
     try:
-        prompt = f"Analyze NFL odds and answer user question: {message_text}"
-
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150
         )
-
         return completion.choices[0].message.content.strip()
 
     except Exception as e:
-        return f"AI error: {e}"
+        return f"AI Error: {str(e)}"
 
 
-# ---------------------------------------------------------
-#  SEND MESSAGE BACK TO TELEGRAM
-# ---------------------------------------------------------
-def send_message(chat_id, text):
-    url = f"{TELEGRAM_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-
-# ---------------------------------------------------------
-#  WEBHOOK ROUTE
-# ---------------------------------------------------------
-@app.route("/", methods=["POST"])
+@app.route(f"/webhook", methods=["POST"])
 def webhook():
-    update = request.json
+    data = request.json
 
-    if "message" in update:
-        chat_id = update["message"]["chat"]["id"]
-        user_text = update["message"].get("text", "")
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
 
-        if "odds" in user_text.lower():
-            reply = get_betting_odds()
+        if "odds" in text.lower():
+            reply = get_betting_odds(text)
         else:
-            reply = generate_ai_response(user_text)
+            reply = generate_ai_response(text)
 
-        send_message(chat_id, reply)
+        requests.post(
+            TELEGRAM_URL,
+            json={"chat_id": chat_id, "text": reply}
+        )
 
-    return jsonify({"status": "ok"})
-
-
-# ---------------------------------------------------------
-#  HEALTH CHECK
-# ---------------------------------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "Telegram betting bot is running!"
+    return {"ok": True}
 
 
-# Start server (Render uses $PORT)
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
