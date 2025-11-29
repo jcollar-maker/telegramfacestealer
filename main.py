@@ -2,8 +2,15 @@ import os
 import requests
 from flask import Flask, request
 from openai import OpenAI
+import os
+import requests
+from flask import Flask, request
+from openai import OpenAI
 
-# Load secrets from environment variables TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") OPENAI_KEY = os.getenv("OPENAI_KEY") ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+# Load secrets from environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_KEY = os.getenv("OPENAI_KEY")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
 # Validate that secrets exist
 if not TELEGRAM_TOKEN:
@@ -20,15 +27,7 @@ client = OpenAI(api_key=OPENAI_KEY)
 app = Flask(__name__)
 
 # Telegram base URL
-TELEGRAM_URL = f"https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi.telegram.org%2Fbot&data=05%7C02%7Cjcollar1%40iuhealth.org%7C1b4247443ade4595041108de2f79650b%7Cd9d470633f5e4de9bf99f083657fa0fe%7C0%7C0%7C639000395612684108%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=tga0%2BF3GRcKatzOTvGuyLEAlIrWYn3kNZZk5MVV9uL0%3D&reserved=0{TELEGRAM_TOKEN}"
-
-
-# ---------------------------------------------------------
-#  GET NFL ODDS
-# ---------------------------------------------------------
-def get_betting_odds():
-    url = f"https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Fapi.the-odds-api.com%2Fv4%2Fsports%2Famericanfootball_nfl%2Fodds%2F%3FapiKey%3D&data=05%7C02%7Cjcollar1%40iuhealth.org%7C1b4247443ade4595041108de2f79650b%7Cd9d470633f5e4de9bf99f083657fa0fe%7C0%7C0%7C639000395612710297%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=OD%2Fw206WxrBEJfCNM2Ll01Wpzaq2TaGSJhi9t0omdoI%3D&reserved=0{ODDS_API_KEY}&regions=us&markets=h2h"
-
+TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     response = requests.get(url)
     if response.status_code != 200:
         return "Could not fetch odds."
