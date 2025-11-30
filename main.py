@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 """
 MAIN.PY - FULLY MAXED-OUT STEALIE BOT (NFL + CFB + SGP + PROPS + EV + SHARP + CACHING + GENERAL Q&A)
-
-Features:
-- Multi-sport support (NFL / CFB) with easy router commands
-- Odds caching with TTL to reduce API hits
-- Sharp scoring (line variance, mean closeness, implied moneyline divergence)
-- Props support (tries to pull player props from Odds API, falls back to AI)
-- AI-backed pick generator (returns JSON-like pick + confidence)
-- EV estimator, Model Grade (A-F)
-- Same-Game Parlay (SGP) builder
-- Auto-parlay builder + Dabble-friendly slip
-- Per-chat unit tracking (persistent JSON file)
-- Rate limiting, basic admin endpoints, robust error handling
-- AI general Q&A
-- Uses only Flask + requests + standard library + openai client
 """
 
 import os
@@ -249,24 +235,17 @@ def format_dabble_slip(legs, stake_units=1, unit_value=1.0):
     return slip
 
 # -------------------------
-# Parlay / SGP builder
-# -------------------------
-# [Keep previous parlay / sgp functions here]
-
-# -------------------------
-# AI integration (picks & props fallback)
-# -------------------------
-# [Keep previous call_openai_for_pick and call_openai_for_props]
-
-# -------------------------
-# Units management
-# -------------------------
-# [Keep previous units management functions]
-
-# -------------------------
 # Telegram send wrapper
 # -------------------------
-# [Keep previous send_telegram function]
+def send_telegram(chat_id, text):
+    if not TELEGRAM_TOKEN:
+        logging.warning("TELEGRAM_TOKEN not set; cannot send message")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
+    except Exception:
+        logging.exception("send_telegram failed")
 
 # -------------------------
 # Webhook / Router
@@ -282,97 +261,108 @@ def require_admin(f):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json() or {}
-    if "message" not in data:
-        return jsonify({"ok": True})
-    msg = data["message"]
-    chat_id = msg["chat"]["id"]
-    text = msg.get("text", "").strip()
-    t = text.lower()
-
-    limited, wait = is_rate_limited(chat_id)
-    if limited:
-        send_telegram(chat_id, f"⏳ Rate limit: try again in {wait}s.")
-        return jsonify({"ok": True})
-
-    # -------------------------
-    # Greeting / Capabilities explanation
-    # -------------------------
-    if t in ("/start","hello","hi","hey"):
-        greeting = (
-            "👋 Hello! I’m Stealie — your multi-sport betting and sports assistant bot.\n\n"
-            "I can help with:\n"
-            "• NFL & College Football game cards (odds, spreads, totals)\n"
-            "• Sharp edge reports (top games to watch)\n"
-            "• Player props (from books or AI suggestions)\n"
-            "• Auto parlays & same-game parlays (SGP)\n"
-            "• EV estimates, suggested units, and model grades\n"
-            "• Answer general questions about sports or betting\n\n"
-            "Commands you can try:\n"
-            "/card - Today's game card\n"
-            "/sharp - Top sharp games\n"
-            "/props - Player props\n"
-            "/parlay - Auto parlay suggestion\n"
-            "/sgp <team> - Same-game parlay\n"
-            "/units - Check your units\n"
-            "/addunits <number> - Adjust units\n"
-            "/question <your query> - Ask me anything\n\n"
-            "Type any of the commands to get started!"
-        )
-        send_telegram(chat_id, greeting)
-        return jsonify({"ok": True})
-
-    # -------------------------
-    # General question handler (fixed line 365)
-    # -------------------------
-    if t.startswith("/question"):
-        if not client:
-            send_telegram(chat_id, "⚠️ AI unavailable (OpenAI key missing).")
+    try:
+        data = request.get_json() or {}
+        if "message" not in data:
             return jsonify({"ok": True})
-        query = text[len("/question"):].strip()
-        if not query:
-            send_telegram(chat_id, "Usage: /question <your question>")
+        msg = data["message"]
+
+        # Safe chat ID
+        chat = msg.get("chat")
+        if not chat or "id" not in chat:
+            logging.warning("Webhook received message without chat id")
             return jsonify({"ok": True})
-        try:
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": query}],
-                temperature=0.7,
-                max_tokens=300
+        chat_id = chat["id"]
+
+        # Safe text
+        text = msg.get("text", "")
+        if not text:
+            logging.info(f"Non-text message in chat {chat_id}, ignoring")
+            return jsonify({"ok": True})
+        t = text.lower()
+
+        # Rate limiting
+        limited, wait = is_rate_limited(chat_id)
+        if limited:
+            send_telegram(chat_id, f"⏳ Rate limit: try again in {wait}s.")
+            return jsonify({"ok": True})
+
+        # -------------------------
+        # Greeting / Capabilities explanation
+        # -------------------------
+        if t in ("/start","hello","hi","hey"):
+            greeting = (
+                "👋 Hello! I’m Stealie — your multi-sport betting and sports assistant bot.\n\n"
+                "I can help with:\n"
+                "• NFL & College Football game cards (odds, spreads, totals)\n"
+                "• Sharp edge reports (top games to watch)\n"
+                "• Player props (from books or AI suggestions)\n"
+                "• Auto parlays & same-game parlays (SGP)\n"
+                "• EV estimates, suggested units, and model grades\n"
+                "• Answer general questions about sports or betting\n\n"
+                "Commands you can try:\n"
+                "/card - Today's game card\n"
+                "/sharp - Top sharp games\n"
+                "/props - Player props\n"
+                "/parlay - Auto parlay suggestion\n"
+                "/sgp <team> - Same-game parlay\n"
+                "/units - Check your units\n"
+                "/addunits <number> - Adjust units\n"
+                "/question <your query> - Ask me anything\n\n"
+                "Type any of the commands to get started!"
             )
-            # Robust extraction for all SDK versions
+            send_telegram(chat_id, greeting)
+            return jsonify({"ok": True})
+
+        # -------------------------
+        # General question handler
+        # -------------------------
+        if t.startswith("/question"):
+            if not client:
+                send_telegram(chat_id, "⚠️ AI unavailable (OpenAI key missing).")
+                return jsonify({"ok": True})
+            query = text[len("/question"):].strip()
+            if not query:
+                send_telegram(chat_id, "Usage: /question <your question>")
+                return jsonify({"ok": True})
             try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": query}],
+                    temperature=0.7,
+                    max_tokens=300
+                )
                 answer = resp.choices[0].message.content.strip()
-            except AttributeError:
-                answer = resp.choices[0].message["content"].strip() if hasattr(resp.choices[0], "message") else resp.choices[0].text.strip()
-            send_telegram(chat_id, f"🧠 Answer:\n{answer}")
-        except Exception:
-            logging.exception("AI question failed")
-            send_telegram(chat_id, "⚠️ Failed to get AI response.")
+                send_telegram(chat_id, f"🧠 Answer:\n{answer}")
+            except Exception:
+                logging.exception("AI question failed")
+                send_telegram(chat_id, "⚠️ Failed to get AI response.")
+            return jsonify({"ok": True})
+
+        # -------------------------
+        # Rest of command routing (cards, parlays, units, picks)
+        # -------------------------
+        # [Keep all previous card, sharp, props, parlay, sgp, pick, units handling here]
+
+        # Default / help
+        help_text = (
+            "👊 Stealie Bot Commands:\n"
+            "• card / slate / games [nfl|cfb] — get game card (default = nfl)\n"
+            "• sharp card — top edge games\n"
+            "• props card — player props (books or AI)\n"
+            "• parlay / auto-parlay — auto 3-leg parlay suggestion\n"
+            "• sgp <team> — same-game parlay for team\n"
+            "• pick — AI single high-confidence pick\n"
+            "• set units <n> / add units <n> / units — manage bankroll units\n"
+            "• /betparlay <units> — place last suggested parlay (must have units)\n"
+            "• /question <your question> — ask general questions"
+        )
+        send_telegram(chat_id, help_text)
         return jsonify({"ok": True})
 
-    # -------------------------
-    # Rest of command routing (cards, parlays, units, picks)
-    # -------------------------
-    # [Keep all previous card, sharp, props, parlay, sgp, pick, units handling here]
-
-    # -------------------------
-    # Help / default
-    # -------------------------
-    help_text = (
-        "👊 Stealie Bot Commands:\n"
-        "• card / slate / games [nfl|cfb] — get game card (default = nfl)\n"
-        "• sharp card — top edge games\n"
-        "• props card — player props (books or AI)\n"
-        "• parlay / auto-parlay — auto 3-leg parlay suggestion\n"
-        "• sgp <team> — same-game parlay for team\n"
-        "• pick — AI single high-confidence pick\n"
-        "• set units <n> / add units <n> / units — manage bankroll units\n"
-        "• /betparlay <units> — place last suggested parlay (must have units)\n"
-        "• /question <your question> — ask general questions"
-    )
-    send_telegram(chat_id, help_text)
-    return jsonify({"ok": True})
+    except Exception:
+        logging.exception("Exception in /webhook")
+        return jsonify({"ok": True})
 
 # -------------------------
 # Root endpoint
