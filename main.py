@@ -75,7 +75,7 @@ def build_card():
 # ===================================
 # AI Pick — locked to tomorrow’s NFL slate
 # ===================================
-def def ai_pick(user_text=""):
+def ai_pick(user_text=""):
     if not client:
         return "Jaguars -3.5 vs Titans tomorrow 🔥\nJax 7-1 ATS on road, Titans dead last in rush D."
 
