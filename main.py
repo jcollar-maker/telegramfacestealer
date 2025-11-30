@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-MAIN.PY - FULLY MAXED-OUT STEALIE BOT (NFL + CFB + SGP + PROPS + EV + SHARP + CACHING + GENERAL Q&A)
+MAIN.PY - Stealie MAX (NFL default) — full-featured Telegram bot
+- Cards (NFL default) / Sharp / Props (books -> AI fallback)
+- Auto-parlay + Same-game parlay (SGP)
+- AI picks + EV / grading
+- Units management, caching, rate limiting
+- Robust webhook handling to avoid crashes
 """
 
 import os
@@ -15,7 +20,12 @@ from datetime import datetime, timedelta
 
 import requests
 from flask import Flask, request, jsonify, abort
-from openai import OpenAI
+
+# OpenAI client import (wrap to avoid crashes if not installed)
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 # -------------------------
 # Basic configuration
@@ -29,8 +39,16 @@ OPENAI_KEY = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
 ODDS_KEY = os.getenv("ODDS_API_KEY")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", None)
 
-# OpenAI client
-client = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+# Initialize OpenAI client safely
+client = None
+if OpenAI and OPENAI_KEY:
+    # prefer env var method for broad compatibility
+    os.environ["OPENAI_API_KEY"] = OPENAI_KEY
+    try:
+        client = OpenAI()
+    except Exception:
+        logging.exception("OpenAI client init failed; client set to None")
+        client = None
 
 # Persistence path
 DATA_PATH = os.environ.get("DATA_PATH", "/tmp/stealie_data.json")
@@ -41,7 +59,7 @@ CACHE = {}
 CACHE_LOCK = Lock()
 CACHE_TTL = int(os.environ.get("ODDS_CACHE_TTL_SEC", 55))
 
-# Rate limit per chat
+# Rate limiting per chat (seconds)
 RATE_WINDOW_SEC = int(os.environ.get("RATE_WINDOW_SEC", 5))
 LAST_REQUEST = {}
 LAST_REQUEST_LOCK = Lock()
@@ -49,11 +67,15 @@ LAST_REQUEST_LOCK = Lock()
 # Odds API base
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
-# Default number of games to fetch
+# Default sport = NFL
+DEFAULT_SPORT_KEY = "americanfootball_nfl"
+DEFAULT_SPORT_NAME = "nfl"
+
+# Default fetch limit
 DEFAULT_LIMIT = 12
 
 # -------------------------
-# Utility: persistence
+# Persistence helpers
 # -------------------------
 def load_data():
     try:
@@ -74,7 +96,7 @@ def save_data(data):
     except Exception:
         logging.exception("save_data failed")
 
-# Ensure file exists early
+# ensure file exists
 save_data(load_data())
 
 # -------------------------
@@ -96,6 +118,7 @@ def _cache_key(sport_key):
     return f"odds::{sport_key}"
 
 def get_cached_odds(sport_key, limit=DEFAULT_LIMIT):
+    # return empty list on failure to avoid None checks elsewhere
     key = _cache_key(sport_key)
     with CACHE_LOCK:
         rec = CACHE.get(key)
@@ -105,7 +128,8 @@ def get_cached_odds(sport_key, limit=DEFAULT_LIMIT):
     if data is not None:
         with CACHE_LOCK:
             CACHE[key] = {"ts": time.time(), "data": data}
-    return data
+        return data[:limit]
+    return []
 
 def fetch_odds_api(sport_key, limit=DEFAULT_LIMIT):
     if not ODDS_KEY:
@@ -121,7 +145,10 @@ def fetch_odds_api(sport_key, limit=DEFAULT_LIMIT):
     try:
         resp = requests.get(url, params=params, timeout=12)
         if resp.status_code == 200:
-            data = resp.json()[:limit]
+            data = resp.json()
+            # ensure it's a list
+            if isinstance(data, list):
+                return data[:limit]
             return data
         logging.warning("Odds API status %s: %s", resp.status_code, resp.text[:200])
         return None
@@ -130,7 +157,7 @@ def fetch_odds_api(sport_key, limit=DEFAULT_LIMIT):
         return None
 
 # -------------------------
-# Helpers for line comparison & sharp scoring
+# Helpers: parse markets & compute sharpness
 # -------------------------
 def compare_lines_across_books(game):
     spreads = {}
@@ -139,22 +166,29 @@ def compare_lines_across_books(game):
     for b in game.get("bookmakers", []):
         bname = b.get("title", "book")
         for m in b.get("markets", []):
-            if m.get("key") == "spreads":
+            key = m.get("key")
+            if key == "spreads":
                 for o in m.get("outcomes", []):
                     team = o.get("name")
                     pt = o.get("point")
                     if isinstance(pt, (int, float)):
                         spreads.setdefault(team, []).append((bname, pt))
-            if m.get("key") == "totals":
+            elif key == "totals":
                 for o in m.get("outcomes", []):
                     pt = o.get("point")
                     if isinstance(pt, (int, float)):
                         totals.append((bname, pt))
-            if m.get("key") == "h2h":
+            elif key == "h2h":
                 prices = {}
                 for o in m.get("outcomes", []):
                     prices[o.get("name")] = o.get("price", None)
                 h2h.append((bname, prices))
+            else:
+                # sometimes key includes 'player' or 'player_props'
+                k = key or ""
+                if "player" in k or k == "player_props":
+                    # ignore here; props handled elsewhere
+                    pass
     return {"spreads": spreads, "totals": totals, "h2h": h2h}
 
 def compute_sharp_score(game):
@@ -185,10 +219,7 @@ def compute_sharp_score(game):
                         team_probs.setdefault(t, []).append(pr)
             for t, ps in team_probs.items():
                 avg = statistics.mean(ps)
-                if avg and avg > 1.01:
-                    prob = 1.0 / avg
-                else:
-                    prob = 0.5
+                prob = (1.0 / avg) if (avg and avg > 1.01) else 0.5
                 ml_divergence += abs(prob - 0.5)
             if team_probs:
                 ml_divergence = ml_divergence / len(team_probs)
@@ -200,13 +231,17 @@ def compute_sharp_score(game):
         return 0.0
 
 # -------------------------
-# Model grading & EV
+# Grading & EV
 # -------------------------
 def grade_from_confidence(conf):
-    if conf >= 0.85: return "A"
-    if conf >= 0.7: return "B"
-    if conf >= 0.55: return "C"
-    if conf >= 0.4: return "D"
+    if conf >= 0.85:
+        return "A"
+    if conf >= 0.7:
+        return "B"
+    if conf >= 0.55:
+        return "C"
+    if conf >= 0.4:
+        return "D"
     return "F"
 
 def estimate_ev(confidence, decimal_odds):
@@ -235,6 +270,315 @@ def format_dabble_slip(legs, stake_units=1, unit_value=1.0):
     return slip
 
 # -------------------------
+# Parlay & SGP builders
+# -------------------------
+def build_auto_parlay(sport_key=DEFAULT_SPORT_KEY, n_legs=3, stake_units=1):
+    games = get_cached_odds(sport_key, limit=30)
+    if not games:
+        return None, "Odds unavailable"
+    candidates = []
+    for g in games:
+        try:
+            comp = compare_lines_across_books(g)
+            for team, pts in comp["spreads"].items():
+                vals = [p for (_, p) in pts if isinstance(p, (int, float))]
+                if not vals:
+                    continue
+                mean = statistics.mean(vals)
+                candidates.append({
+                    "game": g,
+                    "team": team,
+                    "line": mean,
+                    "score": abs(mean)
+                })
+        except Exception:
+            continue
+    if not candidates:
+        return None, "No candidate games"
+    candidates_sorted = sorted(candidates, key=lambda x: x["score"])[: n_legs * 4]
+    legs = []
+    seen_games = set()
+    for c in candidates_sorted:
+        if len(legs) >= n_legs:
+            break
+        gid = c["game"].get("id") or (f"{c['game'].get('home_team','')}@{c['game'].get('away_team','')}")
+        if gid in seen_games:
+            continue
+        seen_games.add(gid)
+        odds_decimal = 1.9
+        try:
+            for b in c["game"].get("bookmakers", []):
+                for m in b.get("markets", []):
+                    if m.get("key") == "h2h":
+                        for o in m.get("outcomes", []):
+                            if o.get("name") == c["team"] and isinstance(o.get("price"), (int, float)):
+                                odds_decimal = float(o.get("price"))
+                                raise StopIteration
+        except StopIteration:
+            pass
+        legs.append({
+            "team": c["team"],
+            "market": "spread",
+            "line": c["line"],
+            "odds_decimal": float(odds_decimal),
+            "book": c["game"].get("bookmakers", [{}])[0].get("title", "book")
+        })
+    if not legs:
+        return None, "No suitable parlay legs found"
+    slip = format_dabble_slip(legs, stake_units=stake_units, unit_value=1.0)
+    return {"legs": legs, "slip": slip}, None
+
+def build_sgp_for_team(team_name, sport_key=DEFAULT_SPORT_KEY):
+    games = get_cached_odds(sport_key, limit=60)
+    if not games:
+        return None, "Odds unavailable"
+    candidate = None
+    tn = team_name.lower()
+    for g in games:
+        if tn in (g.get("home_team","").lower() or "") or tn in (g.get("away_team","").lower() or ""):
+            candidate = g
+            break
+    if not candidate:
+        # try a fuzzy match by splitting words
+        for g in games:
+            nm = f"{g.get('home_team','')} {g.get('away_team','')}".lower()
+            if all(part in nm for part in tn.split()):
+                candidate = g
+                break
+    if not candidate:
+        return None, f"No game found for {team_name}"
+    legs = []
+    comp = compare_lines_across_books(candidate)
+    # pick preferred team if exact match
+    preferred_team = None
+    if team_name.lower() in candidate.get("home_team","").lower():
+        preferred_team = candidate.get("home_team")
+    elif team_name.lower() in candidate.get("away_team","").lower():
+        preferred_team = candidate.get("away_team")
+    else:
+        # fallback to away team
+        preferred_team = candidate.get("away_team") or candidate.get("home_team")
+    # spread leg
+    spread_vals = comp["spreads"].get(preferred_team, [])
+    spread_line = spread_vals[0][1] if spread_vals else None
+    spread_odds = 1.9
+    legs.append({"team": preferred_team, "market": "spread", "line": spread_line, "odds_decimal": spread_odds, "book": spread_vals[0][0] if spread_vals else "book"})
+    # total leg
+    if comp["totals"]:
+        tot = comp["totals"][0]
+        legs.append({"team": f"{candidate.get('home_team')} v {candidate.get('away_team')}", "market": "total", "line": tot[1], "odds_decimal": 1.9, "book": tot[0]})
+    # try to find player prop
+    prop_found = False
+    for b in candidate.get("bookmakers", []):
+        for m in b.get("markets", []):
+            k = (m.get("key") or "").lower()
+            if "player" in k or k == "player_props":
+                o = m.get("outcomes", [])[0] if m.get("outcomes") else None
+                if o:
+                    legs.append({"team": o.get("name"), "market": "player_prop", "line": o.get("point"), "odds_decimal": float(o.get("price") or 1.9), "book": b.get("title")})
+                    prop_found = True
+                    break
+        if prop_found:
+            break
+    slip = format_dabble_slip(legs, stake_units=1, unit_value=1.0)
+    return {"game": candidate, "legs": legs, "slip": slip}, None
+
+# -------------------------
+# OpenAI helpers (robust)
+# -------------------------
+def safe_extract_chat_resp(resp):
+    """
+    Robust extraction of assistant content across SDK differences.
+    """
+    try:
+        # preferred (newer style)
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        try:
+            # alternate dict style
+            return resp.choices[0].message["content"].strip()
+        except Exception:
+            try:
+                # fallback to text
+                return resp.choices[0].text.strip()
+            except Exception:
+                return None
+
+def call_openai_for_pick(sport="NFL", odds_snippet=None):
+    if not client:
+        return None
+    try:
+        prompt = (
+            f"You are a world-class sharp bettor.\n"
+            f"Return a JSON object with keys: pick_text, confidence (0-1), reason, suggested_decimal_odds.\n"
+            f"Make one concise pick for {sport} today's slate. Use the odds snippet for context if present.\n"
+            f"Odds snippet: {odds_snippet or 'none'}\n"
+            f"Keep responses strict JSON only."
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=220
+        )
+        txt = safe_extract_chat_resp(resp) or ""
+        # try parse JSON
+        try:
+            j = json.loads(txt)
+            return j
+        except Exception:
+            # try substring
+            start = txt.find("{")
+            end = txt.rfind("}")
+            if start != -1 and end != -1:
+                try:
+                    j = json.loads(txt[start:end+1])
+                    return j
+                except Exception:
+                    pass
+            # fallback
+            return {"pick_text": txt.split("\n")[0] if txt else "No pick", "confidence": 0.6, "reason": (txt or "")[:240], "suggested_decimal_odds": 1.9}
+    except Exception:
+        logging.exception("call_openai_for_pick error")
+        return None
+
+def call_openai_for_props(sport="NFL", odds_snippet=None):
+    if not client:
+        return None
+    try:
+        prompt = (
+            f"You are an elite sports prop matcher. For {sport} generate a JSON array of 5 objects with keys: player, line, suggestion_text, confidence (0-1), suggested_decimal_odds.\n"
+            f"Use odds snippet: {odds_snippet or 'none'}\n"
+            f"Return strict JSON only."
+        )
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=420
+        )
+        txt = safe_extract_chat_resp(resp) or ""
+        try:
+            arr = json.loads(txt)
+            return arr
+        except Exception:
+            start = txt.find("[")
+            end = txt.rfind("]")
+            if start != -1 and end != -1:
+                try:
+                    arr = json.loads(txt[start:end+1])
+                    return arr
+                except Exception:
+                    pass
+            return None
+    except Exception:
+        logging.exception("call_openai_for_props error")
+        return None
+
+# -------------------------
+# Card text builders
+# -------------------------
+def game_card_text(sport="nfl", limit=DEFAULT_LIMIT):
+    sport_key = DEFAULT_SPORT_KEY if sport.lower() == "nfl" else "americanfootball_ncaaf"
+    header = "🔥 TODAY'S NFL GAME CARD 🔥\n" if sport.lower() == "nfl" else "🔥 TODAY'S COLLEGE FOOTBALL CARD 🔥\n"
+    games = get_cached_odds(sport_key, limit=limit)
+    if not games:
+        return f"⚠️ {sport.upper()} odds unavailable (API/cache)."
+    lines = [header]
+    for g in games:
+        home = g.get("home_team") or "Home"
+        away = g.get("away_team") or "Away"
+        try:
+            b0 = g.get("bookmakers", [])[0] if g.get("bookmakers") else {}
+            markets = b0.get("markets", [])
+            spread = "N/A"
+            total = "N/A"
+            for m in markets:
+                if m.get("key") == "spreads":
+                    for o in m.get("outcomes", []):
+                        if o.get("name") == home:
+                            spread = o.get("point")
+                if m.get("key") == "totals":
+                    outs = m.get("outcomes", [])
+                    if outs:
+                        total = outs[0].get("point")
+            sharp_score = compute_sharp_score(g)
+            lines.append(f"🏈 {away} @ {home}\n   {home} {spread}  |  O/U {total}\n   SharpScore: {sharp_score}")
+        except Exception:
+            lines.append(f"🏈 {away} @ {home}\n")
+    return "\n".join(lines)
+
+def sharp_card_text(sport="nfl", limit=30, top_n=5):
+    sport_key = DEFAULT_SPORT_KEY if sport.lower() == "nfl" else "americanfootball_ncaaf"
+    games = get_cached_odds(sport_key, limit=limit)
+    scored = []
+    if games:
+        for g in games:
+            sc = compute_sharp_score(g)
+            scored.append((sc, g))
+    if not scored:
+        return "⚠️ No odds available for sharp report."
+    scored = sorted(scored, key=lambda x: x[0], reverse=True)[:top_n]
+    out = ["⚡ SHARP EDGE REPORT ⚡"]
+    for sc, g in scored:
+        out.append(f"{g.get('away_team')} @ {g.get('home_team')} — SharpScore: {sc}")
+    return "\n".join(out)
+
+def props_card_text(sport="nfl"):
+    sport_key = DEFAULT_SPORT_KEY if sport.lower() == "nfl" else "americanfootball_ncaaf"
+    games = get_cached_odds(sport_key, limit=8)
+    props = []
+    # try books first
+    for g in games:
+        for b in g.get("bookmakers", []):
+            for m in b.get("markets", []):
+                k = (m.get("key") or "").lower()
+                if "player" in k or k == "player_props":
+                    for o in m.get("outcomes", []):
+                        props.append({
+                            "player": o.get("name"),
+                            "line": o.get("point"),
+                            "book": b.get("title"),
+                            "odds": o.get("price", 1.9)
+                        })
+    if props:
+        lines = ["🔥 TOP PLAYER PROPS (from books) 🔥"]
+        for p in props[:8]:
+            lines.append(f"{p['player']} — {p['line']} @ {p['book']} (odds {p['odds']})")
+        return "\n".join(lines)
+    # AI fallback
+    odds_snippet = json.dumps(games, default=str)[:2000] if games else None
+    ai_props = call_openai_for_props("NFL" if sport.lower() == "nfl" else "CFB", odds_snippet=odds_snippet)
+    if ai_props:
+        lines = ["🔥 TOP PLAYER PROPS (AI) 🔥"]
+        for item in ai_props[:5]:
+            lines.append(f"{item.get('player')} — {item.get('line')} — {item.get('suggestion_text')} (conf {item.get('confidence')})")
+        return "\n".join(lines)
+    # last resort fallback
+    return "⚠️ No props available (books or AI)."
+
+# -------------------------
+# Units management
+# -------------------------
+def get_units(chat_id):
+    data = load_data()
+    return float(data.get("users", {}).get(str(chat_id), {}).get("units", 0.0))
+
+def set_units(chat_id, units):
+    data = load_data()
+    data.setdefault("users", {})
+    data["users"].setdefault(str(chat_id), {})
+    data["users"][str(chat_id)]["units"] = float(units)
+    save_data(data)
+    return float(units)
+
+def add_units(chat_id, delta):
+    current = get_units(chat_id)
+    new = current + float(delta)
+    set_units(chat_id, new)
+    return new
+
+# -------------------------
 # Telegram send wrapper
 # -------------------------
 def send_telegram(chat_id, text):
@@ -243,12 +587,14 @@ def send_telegram(chat_id, text):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=8)
+        if resp.status_code != 200:
+            logging.warning("send_telegram status %s: %s", resp.status_code, resp.text[:200])
     except Exception:
         logging.exception("send_telegram failed")
 
 # -------------------------
-# Webhook / Router
+# Webhook / Router (robust)
 # -------------------------
 def require_admin(f):
     @wraps(f)
@@ -263,34 +609,36 @@ def require_admin(f):
 def webhook():
     try:
         data = request.get_json() or {}
-        if "message" not in data:
-            return jsonify({"ok": True})
-        msg = data["message"]
+        logging.debug("Incoming update: %s", data)
 
-        # Safe chat ID
+        # handle different update types safely
+        # message payload may be in 'message' or 'edited_message'
+        msg = data.get("message") or data.get("edited_message") or {}
+        if not msg:
+            # could be inline_query, callback_query, etc. ignore for now
+            logging.info("Update without message; ignoring.")
+            return jsonify({"ok": True})
+
         chat = msg.get("chat")
         if not chat or "id" not in chat:
-            logging.warning("Webhook received message without chat id")
+            logging.warning("No chat id in update; ignoring.")
             return jsonify({"ok": True})
         chat_id = chat["id"]
 
-        # Safe text
-        text = msg.get("text", "")
+        text = (msg.get("text") or "").strip()
         if not text:
-            logging.info(f"Non-text message in chat {chat_id}, ignoring")
+            logging.info("Non-text message received; ignoring.")
             return jsonify({"ok": True})
-        t = text.lower()
+        t = text.lower().strip()
 
-        # Rate limiting
+        # rate limit
         limited, wait = is_rate_limited(chat_id)
         if limited:
             send_telegram(chat_id, f"⏳ Rate limit: try again in {wait}s.")
             return jsonify({"ok": True})
 
-        # -------------------------
-        # Greeting / Capabilities explanation
-        # -------------------------
-        if t in ("/start","hello","hi","hey"):
+        # /start / greeting
+        if t in ("/start", "hello", "hi", "hey"):
             greeting = (
                 "👋 Hello! I’m Stealie — your multi-sport betting and sports assistant bot.\n\n"
                 "I can help with:\n"
@@ -314,9 +662,7 @@ def webhook():
             send_telegram(chat_id, greeting)
             return jsonify({"ok": True})
 
-        # -------------------------
-        # General question handler
-        # -------------------------
+        # /question -> general AI Q&A
         if t.startswith("/question"):
             if not client:
                 send_telegram(chat_id, "⚠️ AI unavailable (OpenAI key missing).")
@@ -332,19 +678,132 @@ def webhook():
                     temperature=0.7,
                     max_tokens=300
                 )
-                answer = resp.choices[0].message.content.strip()
+                answer = safe_extract_chat_resp(resp) or "No response from AI."
                 send_telegram(chat_id, f"🧠 Answer:\n{answer}")
             except Exception:
                 logging.exception("AI question failed")
                 send_telegram(chat_id, "⚠️ Failed to get AI response.")
             return jsonify({"ok": True})
 
-        # -------------------------
-        # Rest of command routing (cards, parlays, units, picks)
-        # -------------------------
-        # [Keep all previous card, sharp, props, parlay, sgp, pick, units handling here]
+        # unit management
+        if t.startswith("set units"):
+            try:
+                parts = t.split()
+                val = float(parts[2])
+                set_units(chat_id, val)
+                send_telegram(chat_id, f"✅ Units set to {val}.")
+            except Exception:
+                send_telegram(chat_id, "Usage: set units <number>")
+            return jsonify({"ok": True})
+        if t.startswith("add units"):
+            try:
+                parts = t.split()
+                val = float(parts[2])
+                new = add_units(chat_id, val)
+                send_telegram(chat_id, f"✅ Added {val} units. New balance: {new}")
+            except Exception:
+                send_telegram(chat_id, "Usage: add units <number>")
+            return jsonify({"ok": True})
+        if t in ("units", "my units"):
+            u = get_units(chat_id)
+            send_telegram(chat_id, f"Your units: {u}")
+            return jsonify({"ok": True})
 
-        # Default / help
+        # Card-related commands (default NFL)
+        if "card" in t or "slate" in t or "games" in t:
+            sport = "nfl" if "nfl" in t else "cfb" if "cfb" in t or "college" in t else DEFAULT_SPORT_NAME
+            # props
+            if "prop" in t or "props" in t or "player" in t:
+                send_telegram(chat_id, props_card_text(sport))
+                return jsonify({"ok": True})
+            # sharp
+            if "sharp" in t:
+                send_telegram(chat_id, sharp_card_text(sport))
+                return jsonify({"ok": True})
+            # sgp
+            if "sgp" in t or "same-game" in t or "same game" in t:
+                parts = t.split()
+                teamname = " ".join(parts[1:]) if len(parts) > 1 else ""
+                if not teamname:
+                    send_telegram(chat_id, "Usage: sgp <team name> (e.g. sgp chiefs)")
+                    return jsonify({"ok": True})
+                sport_key = DEFAULT_SPORT_KEY if "nfl" in t or "nfl" in text.lower() else "americanfootball_ncaaf"
+                sgp, err = build_sgp_for_team(teamname, sport_key=sport_key)
+                if err:
+                    send_telegram(chat_id, f"⚠️ {err}")
+                else:
+                    human = f"🔒 SAME-GAME PARLAY for {teamname} 🔒\n"
+                    for i, leg in enumerate(sgp["legs"], 1):
+                        human += f"{i}. {leg['market']} — {leg.get('team')} {leg.get('line')} @ {leg.get('book')} (odds {leg.get('odds_decimal')})\n"
+                    human += f"\nParlay odds: {sgp['slip']['parlay_odds_decimal']}x — Possible return on 1 unit: ${sgp['slip']['possible_return']}\n"
+                    human += "Use `/betparlay <units>` to place suggested parlay (must set units first)."
+                    d = load_data()
+                    d.setdefault("cache", {})
+                    d["cache"][str(chat_id)] = {"last_parlay": sgp}
+                    save_data(d)
+                    send_telegram(chat_id, human)
+                return jsonify({"ok": True})
+            # auto parlay
+            if "parlay" in t or "auto-parlay" in t:
+                sport_key = DEFAULT_SPORT_KEY if "nfl" in t else "americanfootball_ncaaf"
+                parlay, err = build_auto_parlay(sport_key=sport_key, n_legs=3, stake_units=1)
+                if err:
+                    send_telegram(chat_id, f"⚠️ {err}")
+                else:
+                    d = load_data()
+                    d.setdefault("cache", {})
+                    d["cache"][str(chat_id)] = {"last_parlay": parlay}
+                    save_data(d)
+                    human = "🔗 AUTO-PARLAY SUGGESTION 🔗\n"
+                    for i, leg in enumerate(parlay["legs"], 1):
+                        human += f"{i}. {leg['team']} ({leg['market']}) {leg['line']} @ {leg['book']} — odds {leg['odds_decimal']}\n"
+                    human += f"\nParlay odds: {parlay['slip']['parlay_odds_decimal']}x — Possible return on 1 unit: ${parlay['slip']['possible_return']}\nUse `/betparlay <units>` to lock it in."
+                    send_telegram(chat_id, human)
+                return jsonify({"ok": True})
+            # default game card
+            send_telegram(chat_id, game_card_text(sport))
+            return jsonify({"ok": True})
+
+        # /betparlay placement
+        if t.startswith("/betparlay"):
+            parts = t.split()
+            units = float(parts[1]) if len(parts) > 1 else 1.0
+            d = load_data()
+            last = d.get("cache", {}).get(str(chat_id), {}).get("last_parlay")
+            if not last:
+                send_telegram(chat_id, "No cached parlay. Ask for 'parlay' first.")
+                return jsonify({"ok": True})
+            current_units = get_units(chat_id)
+            if current_units < units:
+                send_telegram(chat_id, f"You have {current_units} units but tried to bet {units}. Add units first.")
+                return jsonify({"ok": True})
+            add_units(chat_id, -units)
+            d.setdefault("cache", {}).setdefault(str(chat_id), {}).setdefault("bets", []).append({"time": datetime.utcnow().isoformat(), "parlay": last, "units": units})
+            save_data(d)
+            send_telegram(chat_id, f"✅ Parlay placed for {units} units. Possible return: ${last['slip']['possible_return']}")
+            return jsonify({"ok": True})
+
+        # AI picks
+        if "pick" in t or "play" in t or "bet" in t:
+            nfl_mode = any(w in t for w in ["nfl", "pro", "week"])
+            sport = "NFL" if nfl_mode else "CFB"
+            odds = get_cached_odds(DEFAULT_SPORT_KEY if nfl_mode else "americanfootball_ncaaf", limit=6)
+            snippet = json.dumps(odds, default=str)[:1200] if odds else None
+            ai = call_openai_for_pick(sport=sport, odds_snippet=snippet)
+            if not ai:
+                send_telegram(chat_id, "⚠️ AI pick unavailable (OpenAI key or error).")
+                return jsonify({"ok": True})
+            pick_text = ai.get("pick_text") or ai.get("pick") or str(ai)
+            confidence = float(ai.get("confidence", 0.6))
+            dec_odds = float(ai.get("suggested_decimal_odds", 1.9))
+            grade = grade_from_confidence(confidence)
+            ev = estimate_ev(confidence, dec_odds)
+            suggestion_units = 0.5 if grade in ("A", "B") else 0.25 if grade == "C" else 0.1
+            human = f"🔒 AI PICK — Grade {grade}\n{pick_text}\nConfidence: {confidence:.2f} | Odds: {dec_odds}\nEV per $1: {ev}\nSuggested stake: {suggestion_units} units"
+            send_telegram(chat_id, human)
+            return jsonify({"ok": True})
+
+        # fallback help
         help_text = (
             "👊 Stealie Bot Commands:\n"
             "• card / slate / games [nfl|cfb] — get game card (default = nfl)\n"
@@ -364,16 +823,12 @@ def webhook():
         logging.exception("Exception in /webhook")
         return jsonify({"ok": True})
 
-# -------------------------
-# Root endpoint
-# -------------------------
+# Root
 @app.route("/", methods=["GET"])
 def home():
-    return "Stealie MAX — NFL & CFB, SGP, Props, EV, Sharp, General Q&A — ready."
+    return "Stealie MAX — NFL default — ready."
 
-# -------------------------
 # Run
-# -------------------------
 if __name__ == "__main__":
     logging.info("Starting Stealie MAXED bot")
     logging.info(f"Cache TTL: {CACHE_TTL}s, Rate window: {RATE_WINDOW_SEC}s")
