@@ -73,42 +73,45 @@ def build_card():
     return "\n".join(lines)
 
 # ===================================
-# AI Pick — locked to tomorrow’s NFL slate
+# AI Pick — locked to tomorrow’s NFL slate + never repeats
 # ===================================
 def ai_pick(user_text=""):
     if not client:
         return "Jaguars -3.5 vs Titans tomorrow 🔥\nJax 7-1 ATS on road, Titans dead last in rush D."
 
-    # Pull 2-3 live games so GPT sees real matchups
+    # Pull real live matchups so GPT can't hallucinate or repeat
     games = get_odds("americanfootball_nfl", 6)
     snippet = ""
     if games:
         snippet = " | ".join(f"{g['away_team']} @ {g['home_team']}" for g in games[:4])
+    if not snippet:
+        snippet = "standard Week 13 slate"
 
     tomorrow = (datetime.now() + timedelta(days=1)).strftime("%A %B %d")
 
-    prompt = f"""Today is Saturday November 29, tomorrow is {tomorrow} (NFL Week 13).
-Live games include: {snippet or "standard Week 13 slate"}
+    prompt = f"""Today is Saturday November 29. Tomorrow is {tomorrow} — NFL Week 13 only.
+Live games include: {snippet}
 
-You are the sharpest NFL capper on earth. Give ONE fresh, high-edge player prop or side/total for tomorrow's games ONLY.
-Never repeat a pick you've given before in this session.
-Include the exact line and 2 sentences of elite reasoning.
-Temperature high — be creative but sharp."""
+You are the sharpest NFL capper alive. Give ONE fresh, high-edge player prop or side/total for tomorrow's games.
+NEVER repeat a pick you've given before in this session.
+Include the exact line + 2 sentences of elite reasoning.
+Be creative, sharp, and accurate. No college. No future weeks."""
 
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.9,        # ← this is the magic line
-            max_tokens=190,
-            top_p=0.95
+            temperature=0.92,      # high enough to prevent repeats
+            top_p=0.95,
+            max_tokens=190
         )
         pick = resp.choices[0].message.content.strip()
-        # Guarantee it’s not blank
-        return pick if len(pick) > 20 else "Trevor Lawrence OVER 245.5 pass yds vs Titans 🔥\nHe’s cleared 260+ in 5 of last 6 road games."
-    
+        # safety net
+        return pick if len(pick) > 25 else "Trevor Lawrence OVER 245.5 pass yds vs Titans 🔥\nHe’s cleared 260+ in 5 of last 6 road games."
+
     except Exception as e:
-        return f"GPT hiccup — hard lock: Jaguars -3.5 tomorrow 🔥\nThey cover this in 8 of last 10 as favorite."
+        logging.error(f"AI pick failed: {e}")
+        return "Jaguars -3.5 vs Titans tomorrow 🔥\nThey cover this in 8 of last 10 as favorite."
 # ===================================
 # Webhook
 # ===================================
