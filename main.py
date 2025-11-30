@@ -56,13 +56,14 @@ def get_target_date():
     eastern = pytz.timezone('US/Eastern')
     now = datetime.now(eastern)
     
-    # Sunday after 8 PM ET = next week
-    if now.weekday() == 6 and now.hour >= 20:
-        target = now + timedelta(days=timedelta(days=7)
+    # Sunday after 8 PM ET → next week
+    if now.weekday() == 6 and now.hour >= 20:  # 6 = Sunday
+        target = now + timedelta(days=7)
         return target.strftime("%A %B %d"), "next Sunday"
     else:
         return now.strftime("%A %B %d"), "today/tonight"
 
+# Call once at startup so it's cached for all functions
 target_date_str, when_text = get_target_date()
 # ==================== CARD ====================
 def build_card():
