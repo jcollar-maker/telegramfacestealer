@@ -7,6 +7,8 @@ import requests
 from flask import Flask, request, jsonify
 import random
 import time
+import pytz
+
 
 # OpenAI
 try:
@@ -49,14 +51,26 @@ def get_odds(sport="americanfootball_nfl", limit=12):
     except Exception as e:
         logging.error(f"Odds fetch exception: {e}")
         return None
+# ==================== AUTO DATE LOGIC (TODAY / TOMORROW) ====================
+def get_target_date():
+    eastern = pytz.timezone('US/Eastern')
+    now = datetime.now(eastern)
+    
+    # Sunday after 8 PM ET = next week
+    if now.weekday() == 6 and now.hour >= 20:
+        target = now + timedelta(days=timedelta(days=7)
+        return target.strftime("%A %B %d"), "next Sunday"
+    else:
+        return now.strftime("%A %B %d"), "today/tonight"
 
+target_date_str, when_text = get_target_date()
 # ==================== CARD ====================
 def build_card():
     games = get_odds()
     if not games:
         return "⚠️ Odds temporarily unavailable — trying again in 60s"
 
-    lines = ["🔥 NFL WEEK 13 — SUNDAY CARD 🔥\n"]
+    lines =lines = [f"🔥 NFL WEEK 13 — {when_text.upper()} {target_date_str.upper()} 🔥\n"]
     for g in games:
         home = g.get("home_team", "?")
         away = g.get("away_team", "?")
@@ -90,12 +104,11 @@ def ai_pick(data):
     ]
 
     # Try live AI first
-    if client:
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%A %B %d")
-        prompt = f"""Today is November 30. Tomorrow is {tomorrow} — NFL Week 13 only.
-Give ONE fresh high-edge player prop or side/total.
-Never repeat the last pick: "{last_pick[-60:]}" (if blank, ignore).
-Include exact line + 2 sharp sentences."""
+       if client:
+        prompt = f"""It's Sunday December 1 — NFL Week 13 games are {when_text}.
+Give ONE sharp high-edge player prop or side/total for {when_text}'s games ONLY.
+Never repeat the last pick: "{last_pick[-60:]}" (ignore if blank).
+Exact line + 2 sentences of reasoning."""
 
         for attempt in range(3):
             try:
