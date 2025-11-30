@@ -709,114 +709,91 @@ def webhook():
             send_telegram(chat_id, f"Your units: {u}")
             return jsonify({"ok": True})
 
-        # Card-related commands (default NFL)
-        if "card" in t or "slate" in t or "games" in t:
-            sport = "nfl" if "nfl" in t else "cfb" if "cfb" in t or "college" in t else DEFAULT_SPORT_NAME
-            # props
-            if "prop" in t or "props" in t or "player" in t:
-                send_telegram(chat_id, props_card_text(sport))
-                return jsonify({"ok": True})
-            # sharp
-            if "sharp" in t:
-                send_telegram(chat_id, sharp_card_text(sport))
-                return jsonify({"ok": True})
-            # sgp
-            if "sgp" in t or "same-game" in t or "same game" in t:
+        # ----- COMMAND ROUTING BELOW -----
+
+        # /card — get today's NFL or CFB card
+        if t.startswith("/card"):
+            try:
                 parts = t.split()
-                teamname = " ".join(parts[1:]) if len(parts) > 1 else ""
-                if not teamname:
-                    send_telegram(chat_id, "Usage: sgp <team name> (e.g. sgp chiefs)")
-                    return jsonify({"ok": True})
-                sport_key = DEFAULT_SPORT_KEY if "nfl" in t or "nfl" in text.lower() else "americanfootball_ncaaf"
-                sgp, err = build_sgp_for_team(teamname, sport_key=sport_key)
-                if err:
-                    send_telegram(chat_id, f"⚠️ {err}")
+                sport = "nfl"  # default
+                if len(parts) > 1:
+                    if parts[1] in ("nfl", "cfb"):
+                        sport = parts[1]
+
+                card = get_full_card(sport)
+                if not card:
+                    send_telegram(chat_id, f"No {sport.upper()} card available right now.")
                 else:
-                    human = f"🔒 SAME-GAME PARLAY for {teamname} 🔒\n"
-                    for i, leg in enumerate(sgp["legs"], 1):
-                        human += f"{i}. {leg['market']} — {leg.get('team')} {leg.get('line')} @ {leg.get('book')} (odds {leg.get('odds_decimal')})\n"
-                    human += f"\nParlay odds: {sgp['slip']['parlay_odds_decimal']}x — Possible return on 1 unit: ${sgp['slip']['possible_return']}\n"
-                    human += "Use `/betparlay <units>` to place suggested parlay (must set units first)."
-                    d = load_data()
-                    d.setdefault("cache", {})
-                    d["cache"][str(chat_id)] = {"last_parlay": sgp}
-                    save_data(d)
-                    send_telegram(chat_id, human)
-                return jsonify({"ok": True})
-            # auto parlay
-            if "parlay" in t or "auto-parlay" in t:
-                sport_key = DEFAULT_SPORT_KEY if "nfl" in t else "americanfootball_ncaaf"
-                parlay, err = build_auto_parlay(sport_key=sport_key, n_legs=3, stake_units=1)
-                if err:
-                    send_telegram(chat_id, f"⚠️ {err}")
+                    send_telegram(chat_id, card)
+            except Exception:
+                logging.exception("Card fetch failed")
+                send_telegram(chat_id, "⚠️ Could not fetch card.")
+            return jsonify({"ok": True})
+
+        # /sharp — sharp report
+        if t.startswith("/sharp"):
+            try:
+                report = get_sharp_report()
+                if not report:
+                    send_telegram(chat_id, "No sharp edges available at the moment.")
                 else:
-                    d = load_data()
-                    d.setdefault("cache", {})
-                    d["cache"][str(chat_id)] = {"last_parlay": parlay}
-                    save_data(d)
-                    human = "🔗 AUTO-PARLAY SUGGESTION 🔗\n"
-                    for i, leg in enumerate(parlay["legs"], 1):
-                        human += f"{i}. {leg['team']} ({leg['market']}) {leg['line']} @ {leg['book']} — odds {leg['odds_decimal']}\n"
-                    human += f"\nParlay odds: {parlay['slip']['parlay_odds_decimal']}x — Possible return on 1 unit: ${parlay['slip']['possible_return']}\nUse `/betparlay <units>` to lock it in."
-                    send_telegram(chat_id, human)
-                return jsonify({"ok": True})
-            # default game card
-            send_telegram(chat_id, game_card_text(sport))
+                    send_telegram(chat_id, report)
+            except Exception:
+                logging.exception("Sharp report failed")
+                send_telegram(chat_id, "⚠️ Could not fetch sharp report.")
             return jsonify({"ok": True})
 
-        # /betparlay placement
-        if t.startswith("/betparlay"):
-            parts = t.split()
-            units = float(parts[1]) if len(parts) > 1 else 1.0
-            d = load_data()
-            last = d.get("cache", {}).get(str(chat_id), {}).get("last_parlay")
-            if not last:
-                send_telegram(chat_id, "No cached parlay. Ask for 'parlay' first.")
-                return jsonify({"ok": True})
-            current_units = get_units(chat_id)
-            if current_units < units:
-                send_telegram(chat_id, f"You have {current_units} units but tried to bet {units}. Add units first.")
-                return jsonify({"ok": True})
-            add_units(chat_id, -units)
-            d.setdefault("cache", {}).setdefault(str(chat_id), {}).setdefault("bets", []).append({"time": datetime.utcnow().isoformat(), "parlay": last, "units": units})
-            save_data(d)
-            send_telegram(chat_id, f"✅ Parlay placed for {units} units. Possible return: ${last['slip']['possible_return']}")
+        # /props — player props
+        if t.startswith("/props"):
+            try:
+                props = get_props()
+                if not props:
+                    send_telegram(chat_id, "No props available right now.")
+                else:
+                    send_telegram(chat_id, props)
+            except Exception:
+                logging.exception("Props fetch failed")
+                send_telegram(chat_id, "⚠️ Could not fetch props.")
             return jsonify({"ok": True})
 
-        # AI picks
-        if "pick" in t or "play" in t or "bet" in t:
-            nfl_mode = any(w in t for w in ["nfl", "pro", "week"])
-            sport = "NFL" if nfl_mode else "CFB"
-            odds = get_cached_odds(DEFAULT_SPORT_KEY if nfl_mode else "americanfootball_ncaaf", limit=6)
-            snippet = json.dumps(odds, default=str)[:1200] if odds else None
-            ai = call_openai_for_pick(sport=sport, odds_snippet=snippet)
-            if not ai:
-                send_telegram(chat_id, "⚠️ AI pick unavailable (OpenAI key or error).")
-                return jsonify({"ok": True})
-            pick_text = ai.get("pick_text") or ai.get("pick") or str(ai)
-            confidence = float(ai.get("confidence", 0.6))
-            dec_odds = float(ai.get("suggested_decimal_odds", 1.9))
-            grade = grade_from_confidence(confidence)
-            ev = estimate_ev(confidence, dec_odds)
-            suggestion_units = 0.5 if grade in ("A", "B") else 0.25 if grade == "C" else 0.1
-            human = f"🔒 AI PICK — Grade {grade}\n{pick_text}\nConfidence: {confidence:.2f} | Odds: {dec_odds}\nEV per $1: {ev}\nSuggested stake: {suggestion_units} units"
-            send_telegram(chat_id, human)
+        # /parlay — auto-generated parlay
+        if t.startswith("/parlay"):
+            try:
+                parlay = make_auto_parlay()
+                send_telegram(chat_id, parlay or "⚠️ Could not build a parlay.")
+            except Exception:
+                logging.exception("Parlay build failed")
+                send_telegram(chat_id, "⚠️ Failed to create parlay.")
             return jsonify({"ok": True})
 
-        # fallback help
-        help_text = (
-            "👊 Stealie Bot Commands:\n"
-            "• card / slate / games [nfl|cfb] — get game card (default = nfl)\n"
-            "• sharp card — top edge games\n"
-            "• props card — player props (books or AI)\n"
-            "• parlay / auto-parlay — auto 3-leg parlay suggestion\n"
-            "• sgp <team> — same-game parlay for team\n"
-            "• pick — AI single high-confidence pick\n"
-            "• set units <n> / add units <n> / units — manage bankroll units\n"
-            "• /betparlay <units> — place last suggested parlay (must have units)\n"
-            "• /question <your question> — ask general questions"
-        )
-        send_telegram(chat_id, help_text)
+        # /sgp <team> — same game parlay
+        if t.startswith("/sgp"):
+            try:
+                team = t.replace("/sgp", "").strip()
+                if not team:
+                    send_telegram(chat_id, "Usage: /sgp <team>")
+                else:
+                    sgp = build_sgp(team)
+                    send_telegram(chat_id, sgp or "⚠️ Could not build SGP.")
+            except Exception:
+                logging.exception("SGP build failed")
+                send_telegram(chat_id, "⚠️ Failed to create SGP.")
+            return jsonify({"ok": True})
+
+        # ----- DEFAULT: GENERAL AI ANSWER -----
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": text}],
+                temperature=0.7,
+                max_tokens=350
+            )
+            answer = safe_extract_chat_resp(resp) or "No response from AI."
+            send_telegram(chat_id, answer)
+        except Exception:
+            logging.exception("General AI failed")
+            send_telegram(chat_id, "⚠️ AI failed to respond.")
+
         return jsonify({"ok": True})
 
     except Exception:
