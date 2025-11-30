@@ -113,10 +113,15 @@ Be creative, sharp, and accurate. No college. No future weeks."""
         logging.error(f"AI pick failed: {e}")
         return "Jaguars -3.5 vs Titans tomorrow 🔥\nThey cover this in 8 of last 10 as favorite."
 # ===================================
-# Webhook
+# Webhook — FIXED for Telegram GET verification + POST handling
 # ===================================
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    # Telegram sends GET first to verify the URL is alive — we must answer 200
+    if request.method == "GET":
+        return "Stealie MAX alive 💀⚡", 200
+
+    # Normal POST message from Telegram
     data = request.get_json()
     if not data or "message" not in data:
         return jsonify({"ok": True})
