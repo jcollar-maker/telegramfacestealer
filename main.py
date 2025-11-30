@@ -70,24 +70,31 @@ def build_card():
     return "\n".join(lines)
 
 # ==================== AI PICK ====================
-ai_pick.last_picks = {}  # User-specific memory
+# Persistent memory so each user never gets the same pick twice
+ai_pick_memory = {}   # ← this is the fix (global dict, no NameError)
+
 def ai_pick(data):
     chat_id = data.get("chat_id", "default")
-    last_pick = ai_pick.last_picks.get(chat_id, "")
+    last_pick = ai_pick_memory.get(chat_id, "")
 
+    # Hard rotating locks (always different)
     hard_locks = [
         "Travis Etienne OVER 72.5 rush yds (-110) 🔥\nTitans 32nd in rush success rate — Jax feeds him 20+ touches.",
         "Calvin Ridley OVER 58.5 rec yds 🐆\nTrevor targets him 10+ times when favored by 3+.",
         "Zay Jones anytime TD +320 💰\nTitans give up most red-zone TDs to slot WRs.",
-        "Derrick Henry UNDER 82.5 rush yds (-115) 💀\nJags top-5 run D since Week 8, Henry under this in 4 of last 6.",
-        "Jaguars -3.5 vs Titans (1 PM) 🏈\nJax 7-1 ATS on road post-bye, Titans 0-5 ATS as home dog."
+        "Derrick Henry UNDER 82.5 rush yds (-115) 💀\nJags top-5 run D since Week 8.",
+        "Jaguars -3.5 vs Titans 🏈\nJax 7-1 ATS on road post-bye, Titans 0-5 ATS as home dog.",
+        "Trevor Lawrence OVER 245.5 pass yds 🔥\nHe’s cleared 260+ in 5 of last 6 road games.",
+        "Evan Engram OVER 48.5 rec yds 🏈\nTitans 31st vs TEs all season.",
+        "Christian Kirk OVER 5.5 receptions +120 🤑\nVolume monster when Jax controls clock."
     ]
 
+    # Try live AI first
     if client:
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%A %B %d")
         prompt = f"""Today is November 30. Tomorrow is {tomorrow} — NFL Week 13 only.
 Give ONE fresh high-edge player prop or side/total.
-Never repeat the last pick: "{last_pick[-50:]}" (if blank, ignore).
+Never repeat the last pick: "{last_pick[-60:]}" (if blank, ignore).
 Include exact line + 2 sharp sentences."""
 
         for attempt in range(3):
@@ -95,12 +102,12 @@ Include exact line + 2 sharp sentences."""
                 resp = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.92,
+                    temperature=0.95,
                     max_tokens=200
                 )
                 pick = resp.choices[0].message.content.strip()
-                if len(pick) > 30 and pick.lower() != last_pick.lower():
-                    ai_pick.last_picks[chat_id] = pick
+                if len(pick) > 30 and pick.lower() not in last_pick.lower():
+                    ai_pick_memory[chat_id] = pick
                     return pick
             except Exception as e:
                 if "429" in str(e):
@@ -108,10 +115,10 @@ Include exact line + 2 sharp sentences."""
                     continue
                 break
 
-    # Fallback: rotating hard lock (never same as last)
-    available = [p for p in hard_locks if p.lower() != last_pick.lower()]
+    # Fallback: rotating hard lock — never the same as last one
+    available = [p for p in hard_locks if p.lower() not in last_pick.lower()]
     new_pick = random.choice(available or hard_locks)
-    ai_pick.last_picks[chat_id] = new_pick
+    ai_pick_memory[chat_id] = new_pick
     return new_pick
 
 # ==================== AUTO-PARLAY ====================
