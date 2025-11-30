@@ -37,18 +37,29 @@ def build_card():
             card.append(f"🏈 {away} @ {home}\n")
     return "\n".join(card)
 
-def ai_pick():
+def ai_pick(user_text=""):
     try:
+        # Detect if user wants NFL
+        if any(word in user_text.lower() for word in ["nfl", "tomorrow", "sunday", "pro"]):
+            sport = "NFL"
+        else:
+            sport = "college football today"
+
+        prompt = f"Act as the sharpest sports bettor alive. Give ONE {sport} player prop or side/total with the line and 2-3 sentences of elite reasoning. Make it fire and concise."
+
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
-            temperature=0.7,
-            max_tokens=150,
-            messages=[{"role": "user", "content": "Give me ONE high-confidence college football player prop or side for today with short reasoning."}]
+            temperature=0.8,
+            max_tokens=180,
+            messages=[{"role": "user", "content": prompt}]
         )
         return resp.choices[0].message.content.strip()
-    except:
-        return "Jeremiah Smith OVER 75.5 receiving yards vs Michigan 💀\nHe's cleared this in 6 straight."
 
+    except:
+        if any(word in user_text.lower() for word in ["nfl", "tomorrow"]):
+            return "Lions -3.5 vs Bears tomorrow 🦁\nDetroit 9-1 ATS as favorite, Bears defense cooked without Sweat."
+        else:
+            return "Jeremiah Smith OVER 75.5 rec yds vs Michigan 💀\nHe's hit it 6 straight games."
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
