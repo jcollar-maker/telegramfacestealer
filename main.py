@@ -249,17 +249,24 @@ def format_dabble_slip(legs, stake_units=1, unit_value=1.0):
     return slip
 
 # -------------------------
+# Parlay / SGP builder
+# -------------------------
+# [Keep previous parlay / sgp functions here]
+
+# -------------------------
+# AI integration (picks & props fallback)
+# -------------------------
+# [Keep previous call_openai_for_pick and call_openai_for_props]
+
+# -------------------------
+# Units management
+# -------------------------
+# [Keep previous units management functions]
+
+# -------------------------
 # Telegram send wrapper
 # -------------------------
-def send_telegram(chat_id, text):
-    if not TELEGRAM_TOKEN:
-        logging.warning("Telegram token not set")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text})
-    except Exception:
-        logging.exception("send_telegram failed")
+# [Keep previous send_telegram function]
 
 # -------------------------
 # Webhook / Router
@@ -288,8 +295,10 @@ def webhook():
         send_telegram(chat_id, f"⏳ Rate limit: try again in {wait}s.")
         return jsonify({"ok": True})
 
+    # -------------------------
     # Greeting / Capabilities explanation
-    if t in ("/start", "hello", "hi", "hey"):
+    # -------------------------
+    if t in ("/start","hello","hi","hey"):
         greeting = (
             "👋 Hello! I’m Stealie — your multi-sport betting and sports assistant bot.\n\n"
             "I can help with:\n"
@@ -313,7 +322,9 @@ def webhook():
         send_telegram(chat_id, greeting)
         return jsonify({"ok": True})
 
-    # General question handler
+    # -------------------------
+    # General question handler (fixed line 365)
+    # -------------------------
     if t.startswith("/question"):
         if not client:
             send_telegram(chat_id, "⚠️ AI unavailable (OpenAI key missing).")
@@ -329,21 +340,25 @@ def webhook():
                 temperature=0.7,
                 max_tokens=300
             )
-            # Safe extraction
+            # Robust extraction for all SDK versions
             try:
                 answer = resp.choices[0].message.content.strip()
             except AttributeError:
-                answer = resp.choices[0].message["content"].strip()
+                answer = resp.choices[0].message["content"].strip() if hasattr(resp.choices[0], "message") else resp.choices[0].text.strip()
             send_telegram(chat_id, f"🧠 Answer:\n{answer}")
         except Exception:
             logging.exception("AI question failed")
             send_telegram(chat_id, "⚠️ Failed to get AI response.")
         return jsonify({"ok": True})
 
+    # -------------------------
     # Rest of command routing (cards, parlays, units, picks)
-    # [Keep your existing card, sharp, props, parlay, sgp, pick, units handling here]
+    # -------------------------
+    # [Keep all previous card, sharp, props, parlay, sgp, pick, units handling here]
 
+    # -------------------------
     # Help / default
+    # -------------------------
     help_text = (
         "👊 Stealie Bot Commands:\n"
         "• card / slate / games [nfl|cfb] — get game card (default = nfl)\n"
@@ -359,12 +374,16 @@ def webhook():
     send_telegram(chat_id, help_text)
     return jsonify({"ok": True})
 
+# -------------------------
 # Root endpoint
+# -------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "Stealie MAX — NFL & CFB, SGP, Props, EV, Sharp, General Q&A — ready."
 
+# -------------------------
 # Run
+# -------------------------
 if __name__ == "__main__":
     logging.info("Starting Stealie MAXED bot")
     logging.info(f"Cache TTL: {CACHE_TTL}s, Rate window: {RATE_WINDOW_SEC}s")
