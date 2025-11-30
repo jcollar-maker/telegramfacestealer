@@ -1,4 +1,4 @@
-# main.py — STEALIE MAX FULL DEGENERATE EDITION (LINE 38 FIXED)
+# main.py — STEALIE MAX FULLY LOADED & ERROR-FREE (line 163 fixed)
 
 import os, logging, random, re, time, requests
 from datetime import datetime, timedelta
@@ -26,7 +26,7 @@ def now_et():
 
 def when():
     n = now_et()
-    if n.weekday() == 6 and n.hour >= 20:  # Sunday after 8 PM ET
+    if n.weekday() == 6 and n.hour >= 20:
         return (n + timedelta(days=7)).strftime("%A %B %d"), "next Sunday"
     return n.strftime("%A %B %d"), "today/tonight"
 
@@ -59,7 +59,7 @@ def card():
             m = g["bookmakers"][0]["markets"]
             spread = next(o["point"] for mk in m if mk["key"]=="spreads" for o in mk["outcomes"] if o["name"]==home)
             total = next(o["point"] for mk in m if mk["key"]=="totals" for o in mk["outcomes"])
-            lines.append(f"{et_time} | {away} @ {home}\n   {home} {spread:+.1f} O/U {total}")
+            lines.append(f"{et_time} | {away} @ {home}\n   {home} {spread:+.1f}  O/U {total}")
         except:
             lines.append(f"{et_time} | {away} @ {home}")
     return "\n".join(lines)
@@ -145,6 +145,7 @@ def webhook():
     chat_id = data["message"]["chat"]["id"]
     text = data["message"].get("text","").lower().strip()
 
+    # Default help message
     reply = "STEALIE MAX\ncard • pick • parlay • big • sgp [team]\nbomb • bankroll +5u"
 
     if "card" in text: reply = card()
@@ -154,7 +155,6 @@ def webhook():
     elif text.startswith("sgp"): reply = sgp(text[3:].strip() or "jaguars")
     elif "bomb" in text: reply = bomb()
     elif "bankroll" in text or "u" in text: reply = update_bankroll(text)
-    else: reply = reply
 
     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                   json={"chat_id": chat_id, "text": reply, "disable_web_page_preview": True})
