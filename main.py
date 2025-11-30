@@ -373,7 +373,6 @@ def webhook():
         "• set units <n> / add units <n> / units — manage bankroll units\n"
         "• /betparlay <units> — place last suggested parlay (must have units)\n"
         "• /question <your question> — ask general questions"
-    )
     send_telegram(chat_id, help_text)
     return jsonify({"ok": True})
 
