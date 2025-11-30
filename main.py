@@ -1,4 +1,4 @@
-# main.py — STEALIE MAX: FULL DEGENERATE BELLS & WHISTLES EDITION
+# main.py — STEALIE MAX: FULL DEGENERATE EDITION (FIXED LINE 53)
 
 import os, logging, random, re, time, requests, json
 from datetime import datetime, timedelta
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ODDS_KEY = os.getenv("ODDS_API_KEY")
 
-# Bankroll tracking (persists in memory)
+# Bankroll tracking
 bankroll = {"total": 100.0, "history": []}
 
 # TODAY/TONIGHT
@@ -26,7 +26,7 @@ def now_et():
 
 def when():
     n = now_et()
-    if n.weekday() == 6 and n.hour >= 20:
+    if n.weekday() == 6 and n.hour >= 20:  # Sunday after 8 PM ET
         return (n + timedelta(days=7)).strftime("%A %B %d"), "next Sunday"
     return n.strftime("%A %B %d"), "today/tonight"
 
@@ -35,19 +35,4 @@ DATE_STR, WHEN_TEXT = when()
 # ODDS
 def odds():
     try:
-        r = requests.get("https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds",
-                        params={"apiKey": ODDS_KEY, "regions": "us", "markets": "h2h,spreads,totals", "oddsFormat": "decimal"},
-                        timeout=12)
-        return r.json() if r.status_code == 200 else []
-    except:
-        return []
-
-# CARD
-def card():
-    games = odds()
-    if not games: return "⚠️ Odds down — retry in 60s"
-    lines = [f"🏈 NFL WEEK 13 — {WHEN_TEXT.upper()} {DATE_STR.upper()} 💀⚡\n"]
-    for g in games:
-        try:
-            t = datetime.fromisoformat(g["commence_time"].replace("Z", "+00:00"))
-            et_time = t.astimezone(now
+        r = requests.get("https://api.the-odds-api.com
