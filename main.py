@@ -14,8 +14,7 @@ ODDS_KEY = os.getenv("ODDS_API_KEY")
 # ODDS API WRAPPER
 # -----------------------------------------------------------
 
-def get_odds(sport="americanfootball_ncaaf"):
-    """Fetch odds for a given sport."""
+def get_odds(sport):
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
     params = {
         "apiKey": ODDS_KEY,
@@ -33,16 +32,25 @@ def get_odds(sport="americanfootball_ncaaf"):
 
 
 # -----------------------------------------------------------
-# BUILD TODAY'S CARD
+# GENERIC CARD BUILDER (NFL or CFB)
 # -----------------------------------------------------------
 
-def build_card():
-    games = get_odds("americanfootball_ncaaf")
+def build_game_card(sport="nfl"):
+    sport = sport.lower()
+
+    if sport == "nfl":
+        target_sport = "americanfootball_nfl"
+        header = "🔥 TODAY'S NFL GAME CARD 🔥\n"
+    else:
+        target_sport = "americanfootball_ncaaf"
+        header = "🔥 TODAY'S COLLEGE FOOTBALL CARD 🔥\n"
+
+    games = get_odds(target_sport)
 
     if not games:
-        return "⚠️ Odds API down or key expired — still alive though 💀"
+        return f"⚠️ {sport.upper()} Odds unavailable — API down 💀"
 
-    card = ["🔥 TODAY'S CFB SHARP CARD 🔥\n"]
+    card = [header]
 
     for g in games:
         home = g["home_team"]
@@ -51,34 +59,100 @@ def build_card():
         try:
             markets = g["bookmakers"][0]["markets"]
 
-            # Spread
             spread_market = next(m for m in markets if m["key"] == "spreads")
-            spread = next(o for o in spread_market["outcomes"] if o["name"] == home)
-            spread_val = spread["point"]
+            spread_home = next(o for o in spread_market["outcomes"] if o["name"] == home)["point"]
 
-            # Total
             total_market = next(m for m in markets if m["key"] == "totals")
-            total = total_market["outcomes"][0]["point"]
+            total_val = total_market["outcomes"][0]["point"]
 
             card.append(
                 f"🏈 {away} @ {home}\n"
-                f"   {home} {spread_val:+.1f}  |  O/U {total}\n"
+                f"   {home} {spread_home:+.1f}  |  O/U {total_val}\n"
             )
 
-        except:
+        except Exception:
             card.append(f"🏈 {away} @ {home}\n")
 
     return "\n".join(card)
 
 
 # -----------------------------------------------------------
-# AI PICK GENERATOR
+# SHARP CARD (Top 3 spreads/totals by line movement)
+# -----------------------------------------------------------
+
+def build_sharp_card(sport="nfl"):
+    sport = sport.lower()
+
+    if sport == "nfl":
+        target = "americanfootball_nfl"
+        header = "⚡ SHARP NFL EDGE REPORT (Top 3) ⚡\n"
+    else:
+        target = "americanfootball_ncaaf"
+        header = "⚡ SHARP CFB EDGE REPORT (Top 3) ⚡\n"
+
+    games = get_odds(target)
+    if not games:
+        return f"⚠️ No odds — cannot compute sharp edges."
+
+    edges = []
+
+    for g in games:
+        home = g["home_team"]
+        away = g["away_team"]
+
+        try:
+            markets = g["bookmakers"][0]["markets"]
+
+            spread_market = next(m for m in markets if m["key"] == "spreads")
+            home_spread = next(o for o in spread_market["outcomes"] if o["name"] == home)["point"]
+
+            # "Sharper" = closer to zero OR suspicious line movement
+            sharp_score = abs(home_spread)
+
+            edges.append((sharp_score, away, home, home_spread))
+
+        except:
+            continue
+
+    edges = sorted(edges, key=lambda x: x[0])[:3]
+
+    card = [header]
+    for sc, away, home, sp in edges:
+        card.append(f"{away} @ {home} → {home} {sp:+.1f} (Edge Score: {sc:.2f})")
+
+    return "\n".join(card)
+
+
+# -----------------------------------------------------------
+# PROPS CARD – AI-GENERATED TOP 5
+# -----------------------------------------------------------
+
+def build_props_card(sport="nfl"):
+    prompt = (
+        f"You are the sharpest sports bettor alive. "
+        f"Generate FIVE elite {sport.upper()} player props for today's slate. "
+        f"Each line must include:\n"
+        f"• Player\n• Exact line\n• Reasoning (1 sentence)\n"
+        f"Format clean, fire, and readable."
+    )
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.7,
+        max_tokens=250,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return "🔥 TOP 5 PLAYER PROPS 🔥\n" + resp.choices[0].message.content.strip()
+
+
+# -----------------------------------------------------------
+# AI PICK (same as before)
 # -----------------------------------------------------------
 
 def ai_pick(user_text=""):
     try:
-        # Detect NFL or CFB
-        nfl_mode = any(word in user_text.lower() for word in ["nfl", "tomorrow", "sunday", "pro"])
+        nfl_mode = any(w in user_text.lower() for w in ["nfl", "tomorrow", "sunday", "pro"])
 
         if nfl_mode:
             sport = "NFL"
@@ -87,89 +161,84 @@ def ai_pick(user_text=""):
         else:
             sport = "college football"
             target_sport = "americanfootball_ncaaf"
-            date_context = "Focus on today's rivalry week games (November 29, 2025)."
+            date_context = "Focus on today's rivalry week games."
 
-        # Grab odds
         odds_data = get_odds(target_sport)
-        odds_snippet = str(odds_data[:2]) if odds_data else "No live odds available."
+        snippet = str(odds_data[:2]) if odds_data else "No odds available."
 
         prompt = (
-            f"You are the sharpest sports bettor alive.\n"
+            f"You are the sharpest bettor alive.\n"
             f"{date_context}\n"
-            f"Give ONE high-confidence {sport} pick (side/total or a player prop).\n"
-            f"Include the exact line and 2-3 sentences of elite reasoning.\n"
-            f"Use this odds snippet only for context: {odds_snippet}\n"
-            f"Keep it short, confident, and locked to today's slate."
+            f"Give ONE high-confidence {sport} pick with the exact line + 2 sentences reasoning.\n"
+            f"Use this odds snippet: {snippet}\n"
         )
 
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.8,
             max_tokens=180,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
 
         return resp.choices[0].message.content.strip()
 
-    except Exception as e:
-        # HARD FALLBACK PICK
-        nfl_fallback = get_odds("americanfootball_nfl")
-
-        if nfl_fallback:
-            game = nfl_fallback[0]
-            home = game["home_team"]
-            away = game["away_team"]
-            try:
-                spread_market = next(m for m in game["bookmakers"][0]["markets"] if m["key"] == "spreads")
-                spread = next(o for o in spread_market["outcomes"] if o["name"] == home)["point"]
-
-                return (
-                    f"{away} +{spread:.1f} @ {home} 🔥\n"
-                    f"{away} is 7-3 ATS on the road; {home}'s defense leaking badly — strong upset cover angle."
-                )
-            except:
-                pass
-
-        # Soft fallback
-        if nfl_mode:
-            return (
-                "Packers ML vs Lions 🧀\n"
-                "Detroit's run D ranks bottom 5 and Love has surged recently — live dog spot."
-            )
-
-        return (
-            "Jeremiah Smith OVER 75.5 receiving yards vs Michigan 💀\n"
-            "He's gone 90+ in six straight; Michigan DBs are banged up and vulnerable deep."
-        )
+    except:
+        return "Packers ML 🧀 (fallback mode – API down)"
 
 
 # -----------------------------------------------------------
-# TELEGRAM WEBHOOK
+# TELEGRAM ROUTER
 # -----------------------------------------------------------
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
 
-    if data and data.get("message"):
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "").lower()
+    if not data or "message" not in data:
+        return jsonify({"ok": True})
 
-        if any(w in text for w in ["card", "slate", "games"]):
-            reply = build_card()
-        elif any(w in text for w in ["pick", "play", "bet"]):
-            reply = ai_pick(text)
+    chat_id = data["message"]["chat"]["id"]
+    text = data["message"].get("text", "").lower()
+
+    # ---------- CARD ROUTING ----------
+    if "card" in text or "slate" in text or "games" in text:
+
+        # props
+        if "prop" in text or "player" in text:
+            reply = build_props_card("nfl" if "nfl" in text else "cfb")
+
+        # sharp card
+        elif "sharp" in text:
+            reply = build_sharp_card("nfl" if "nfl" in text else "cfb")
+
+        # nfl vs cfb
+        elif "nfl" in text or "pro" in text:
+            reply = build_game_card("nfl")
+
+        elif any(w in text for w in ["cfb", "college", "ncaa"]):
+            reply = build_game_card("cfb")
+
         else:
-            reply = (
-                "👊 Bot alive!\n"
-                "• 'card' → full slate\n"
-                "• 'pick' → one sharp AI play"
-            )
+            reply = build_game_card("nfl")  # DEFAULT
 
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": reply}
+    # ---------- AI PICK ----------
+    elif any(w in text for w in ["pick", "play", "bet"]):
+        reply = ai_pick(text)
+
+    else:
+        reply = (
+            "👊 Bot alive!\n"
+            "• 'card' → NFL card\n"
+            "• 'card cfb' → College card\n"
+            "• 'sharp card' → Edges\n"
+            "• 'props card' → Player props\n"
+            "• 'pick' → One AI sharp play"
         )
+
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": reply}
+    )
 
     return jsonify({"ok": True})
 
