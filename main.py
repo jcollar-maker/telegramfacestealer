@@ -70,7 +70,7 @@ def webhook():
         if any(w in text for w in ["card", "slate", "games"]):
             reply = build_card()
         elif any(w in text for w in ["pick", "play", "bet"]):
-            reply = ai_pick()
+            reply = ai_pick(text)
         else:
             reply = "👊 Bot alive!\n• Send:\n• 'card' → full slate\n• 'pick' → one sharp AI play"
 
